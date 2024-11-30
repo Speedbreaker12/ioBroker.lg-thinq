@@ -598,6 +598,142 @@ class LgThinq extends utils.Adapter {
     }
 
     /**
+     * Behandelt Befehle für verschiedene Gerätetypen.
+     */
+    async handleDeviceCommands(id, state, deviceId, lastElement) {
+        try {
+            const deviceModel = this.modelInfos[deviceId];
+            if (!deviceModel) {
+                this.log.warn(`Keine Modellinformationen für Gerät ${deviceId}`);
+                return;
+            }
+
+            switch (deviceModel.deviceType) {
+                case 401:
+                    await this.handleDeviceType401Commands(id, state, deviceId, lastElement);
+                    break;
+
+                case 406:
+                    await this.handleDeviceType406Commands(id, state, deviceId, lastElement);
+                    break;
+
+                default:
+                    this.log.warn(`Unbekannter Gerätetyp ${deviceModel.deviceType} für Gerät ${deviceId}`);
+                    break;
+            }
+        } catch (error) {
+            this.log.error(`handleDeviceCommands Fehler für Gerät ${deviceId}: ${error.message}`);
+        }
+    }
+
+    /**
+     * Behandelt spezifische Befehle für Gerätetyp 401.
+     */
+    async handleDeviceType401Commands(id, state, deviceId, lastElement) {
+        try {
+            if (lastElement === "operation") {
+                const action = state.val ? "Start" : "Stop";
+                const data = {
+                    ctrlKey: "Operation",
+                    command: "Set",
+                    dataKey: "operation",
+                    dataValue: action,
+                    dataSetList: null,
+                    dataGetList: null,
+                };
+                this.log.debug(`Sende Befehl an Gerät 401 (${deviceId}): ${JSON.stringify(data)}`);
+                const response = await this.sendCommandToDevice(deviceId, data, false, false);
+
+                if (response && response.resultCode !== "0000") {
+                    this.log.error(`Befehl an Gerät 401 (${deviceId}) fehlgeschlagen: ${JSON.stringify(response)}`);
+                }
+
+                await this.setAckFlag(id);
+            } else {
+                this.log.info(`Nicht implementierter Befehl ${lastElement} für Gerät 401 (${deviceId})`);
+            }
+        } catch (error) {
+            this.log.error(`handleDeviceType401Commands Fehler für Gerät ${deviceId}: ${error.message}`);
+        }
+    }
+
+    /**
+     * Behandelt spezifische Befehle für Gerätetyp 406.
+     */
+    async handleDeviceType406Commands(id, state, deviceId, lastElement) {
+        try {
+            // Beispielhafte Verarbeitung für Gerätetyp 406
+            if (lastElement === "add_new_schedule") {
+                await this.addHeat(deviceId);
+                await this.setAckFlag(id, { val: false });
+                return;
+            } else if (lastElement === "del_new_schedule") {
+                await this.delHeat(deviceId, state.val);
+                await this.setAckFlag(id);
+                return;
+            } else if (lastElement === "send_new_schedule") {
+                await this.sendHeat(deviceId);
+                await this.setAckFlag(id, { val: false });
+                return;
+            } else {
+                this.log.info(`Nicht implementierter Befehl ${lastElement} für Gerätetyp 406 (${deviceId})`);
+                return;
+            }
+        } catch (error) {
+            this.log.error(`handleDeviceType406Commands Fehler für Gerät ${deviceId}: ${error.message}`);
+        }
+    }
+
+    /**
+     * Behandelt das Senden von JSON-Daten an ein Gerät.
+     */
+    async handleSendJSON(id, state, deviceId, lastElement) {
+        try {
+            const sync = lastElement === "sendJSON" ? true : false;
+            const controlsync = lastElement === "sendJSONNoSync" ? "/control" : "/control-sync";
+            const headers = this.defaultHeaders;
+            const controlUrl = `${this.gateway.thinq2Uri}/service/devices/${deviceId}${controlsync}`;
+            const js = state.val ? state.val.toString() : "";
+            let sendData;
+
+            try {
+                sendData = JSON.parse(js);
+            } catch (e) {
+                this.log.info(`JSON Parsing Fehler: ${e.message}`);
+                return;
+            }
+
+            this.log.debug(`Sende JSON an Gerät ${deviceId}: ${JSON.stringify(sendData)}`);
+            const sendJ = await this.sendCommandToDevice(deviceId, sendData, false, sync);
+
+            this.log.info(`Antwort von Gerät ${deviceId}: ${JSON.stringify(sendJ)}`);
+            await this.setAckFlag(id);
+        } catch (error) {
+            this.log.error(`handleSendJSON Fehler für Gerät ${deviceId}: ${error.message}`);
+        }
+    }
+
+    /**
+     * Behandelt Wetter-bezogene Zustandsänderungen.
+     */
+    async handleWeatherStates(id, state, lastElement) {
+        try {
+            if (lastElement === "device") {
+                await this.setAckFlag(id);
+            } else if (lastElement === "unit") {
+                const units = state.val === "C" ? "°C" : "F";
+                await this.extendObject(`weather.temperature`, { common: { unit: units } });
+                await this.setAckFlag(id);
+            } else if (lastElement === "update") {
+                await this.getWeather();
+                await this.setAckFlag(id, { val: false });
+            }
+        } catch (error) {
+            this.log.error(`handleWeatherStates Fehler für ${id}: ${error.message}`);
+        }
+    }
+
+    /**
      * Extrahiert Werte aus dem Geräte-Modell und erstellt Datenpunkte.
      * @param {Object} device - Das Gerät.
      */
@@ -883,312 +1019,21 @@ class LgThinq extends utils.Adapter {
     }
 
     /**
-     * Erzeugt eine UUID v4.
-     * @returns {string} Eine UUID v4.
+     * Erstellt oder aktualisiert einen Datenpunkt.
+     * @param {string} fullPath - Der vollständige Pfad des Datenpunkts.
+     * @param {Object} common - Das gemeinsame Objekt.
+     * @param {string} type - Der Typ des Objekts.
      */
-    uuidv4() {
-        const hex = crypto.randomBytes(16).toString("hex");
-        return `${hex.substring(0,8)}-${hex.substring(8,12)}-${hex.substring(12,16)}-${hex.substring(16,20)}-${hex.substring(20)}`.toUpperCase();
-    }
-
-    /**
-     * Holt Benutzerdaten.
-     * @param {string} uri_value - Der URI-Wert.
-     * @param {Object} data - Die Daten für die Anfrage.
-     * @returns {Promise<Object|null>} Die API-Antwort oder null bei Fehlern.
-     */
-    async getUser(uri_value, data) {
-        const userUrl = `${this.gateway.thinq2Uri}/${uri_value}`;
-        const headers = { ...this.defaultHeaders, "x-client-id": this.userNumber };
-        this.log.debug(`Abrufen von User Info von URL: ${userUrl}`);
-        this.log.debug(`User Info Daten: ${JSON.stringify(data)}`);
-        this.log.debug(`User Info Headers: ${JSON.stringify(headers)}`);
-
+    async createDataPoint(fullPath, common, type) {
         try {
-            const resp = await axios.post(userUrl, data, { headers });
-            this.log.debug(`User Info Antwort: ${JSON.stringify(resp.data)}`);
-            return resp.data;
-        } catch (error) {
-            this.log.error(`getUser Fehler: ${error.message}`);
-            if (error.response) {
-                this.log.error(`Antwort der API: ${JSON.stringify(error.response.data)}`);
-            }
-            return null;
-        }
-    }
-
-    /**
-     * Sendet einen Befehl an ein Gerät.
-     * @param {string} deviceId - Die Geräte-ID.
-     * @param {Object} values - Die Werte für den Befehl.
-     * @param {boolean} thinq1 - Ob thinq1 verwendet wird.
-     * @param {boolean} get_sync - Ob sync verwendet wird.
-     * @returns {Promise<Object|null>} Die API-Antwort oder null bei Fehlern.
-     */
-    async sendCommandToDevice(deviceId, values, thinq1 = false, get_sync = false) {
-        try {
-            const headers = this.defaultHeaders;
-            let sync = get_sync ? "control-sync" : "control";
-            let controlUrl = `${this.gateway.thinq2Uri}/service/devices/${deviceId}/${sync}`;
-            let data = {
-                ctrlKey: "basicCtrl",
-                command: "Set",
-                ...values,
-            };
-
-            if (thinq1) {
-                controlUrl = `${this.gateway.thinq1Uri}/rti/rtiControl`;
-                data = values;
-            }
-
-            this.log.debug(`Sende Befehl an Gerät ${deviceId}: ${JSON.stringify(data)} an URL: ${controlUrl}`);
-
-            const response = await axios.post(controlUrl, data, { headers });
-            this.log.debug(`Antwort von Gerät ${deviceId}: ${JSON.stringify(response.data)}`);
-            return response.data;
-        } catch (error) {
-            if (
-                error.response &&
-                error.response.status === 400 &&
-                values.ctrlKey === "reservationCtrl" &&
-                values.command === "Get"
-            ) {
-                this.log.debug(`Bad Request: ${error.message}`);
-            } else {
-                this.log.error(`SendCommandToDevice Fehler für Gerät ${deviceId}: ${error.message}`);
-                if (error.response) {
-                    this.log.error(`Antwort der API: ${JSON.stringify(error.response.data)}`);
-                }
-            }
-            return null;
-        }
-    }
-
-    /**
-     * Holt die Modellinformationen für ein Gerät.
-     * @param {Object} device - Das Gerät.
-     * @returns {Promise<Object|string>} Das Gerätemodell oder "NOK" bei Fehlern.
-     */
-    async getDeviceModelInfo(device) {
-        let uris = {};
-        const modelJsonPath = `${this.adapterDir}/lib/modelJsonUri.json`; // Beispiel-Dateipfad
-
-        try {
-            if (fs.existsSync(modelJsonPath)) {
-                const data_uris = fs.readFileSync(modelJsonPath, "utf-8");
-                uris = JSON.parse(data_uris);
-                this.log.debug(`Geladene URIs: ${JSON.stringify(uris)}`);
-            } else {
-                uris.data = {};
-                this.log.warn(`ModelJsonUri-Datei nicht gefunden. Erstelle leeres URIs-Objekt.`);
-            }
-        } catch (err) {
-            this.log.error(`Fehler beim Lesen der ModelJsonUri-Datei: ${err.message}`);
-            uris.data = {};
-        }
-
-        if (!device.modelJsonUri) {
-            this.log.error(`Missing Modelinfo for device - ${device.deviceId}. Bitte erstelle ein neues Issue auf GitHub!`);
-            return "NOK";
-        }
-
-        this.log.debug(`Get Device Model Info for device: ${device.deviceId}`);
-        let stopp = false;
-        let deviceModel = await axios.get(device.modelJsonUri)
-            .then((res) => res.data)
-            .catch((error) => {
-                this.log.error(`Fehler beim Abrufen des Device Models für ${device.deviceId}: ${error.message}`);
-                return null;
-            });
-
-        if (!deviceModel) {
-            if (uris.data[device.modelJsonUri]) {
-                this.log.info(`Use local modelJsonUri for device ${device.deviceId}`);
-                deviceModel = uris.data[device.modelJsonUri];
-            }
-        }
-
-        if (deviceModel) {
-            if (!uris.data[device.modelJsonUri]) {
-                uris.data[device.modelJsonUri] = deviceModel;
-                fs.writeFile(modelJsonPath, JSON.stringify(uris, null, 2), (err) => {
-                    if (err) {
-                        this.log.error(`Fehler beim Schreiben der ModelJsonUri-Datei: ${err.message}`);
-                    } else {
-                        this.log.info(`ModelJsonUri-Datei erfolgreich aktualisiert.`);
-                    }
-                });
-            }
-
-            // Erstelle oder aktualisiere die Remote-Steuerelemente
-            await this.setObjectNotExistsAsync(`${device.deviceId}.remote`, {
-                type: "channel",
-                common: {
-                    name: "remote control device",
-                    desc: "Create by LG-Thinq Adapter",
-                },
+            await this.setObjectNotExistsAsync(fullPath, {
+                type: type,
+                common: common,
                 native: {},
             });
-
-            this.coursetypes[device.deviceId] = {};
-            if (deviceModel["Config"]) {
-                this.coursetypes[device.deviceId]["smartCourseType"] = deviceModel.Config.smartCourseType || "";
-                this.coursetypes[device.deviceId]["courseType"] = deviceModel.Config.courseType || "";
-                this.coursetypes[device.deviceId]["downloadedCourseType"] = deviceModel.Config.downloadedCourseType || "courseType";
-            }
-
-            // Verarbeitung basierend auf dem Gerätetyp und Plattformtyp
-            if (device.deviceType === 406) {
-                await this.handleDeviceType406(device, deviceModel, stopp);
-            } else if (device.deviceType === 401) {
-                await this.handleDeviceType401(device, deviceModel, stopp);
-            }
-
-            // Allgemeine Verarbeitung der ControlWifi-Eigenschaften
-            if (deviceModel["ControlWifi"]) {
-                await this.handleControlWifi(device, deviceModel, stopp);
-            }
-        } else {
-            this.log.error(`Device Model Info konnte nicht abgerufen werden für ${device.deviceId}`);
-            return "NOK";
-        }
-
-        return deviceModel;
-    }
-
-    /**
-     * Behandelt das Senden von JSON-Daten an ein Gerät.
-     */
-    async handleSendJSON(id, state, deviceId, lastElement) {
-        try {
-            const sync = lastElement === "sendJSON" ? true : false;
-            const controlsync = lastElement === "sendJSONNoSync" ? "/control" : "/control-sync";
-            const headers = this.defaultHeaders;
-            const controlUrl = `${this.gateway.thinq2Uri}/service/devices/${deviceId}${controlsync}`;
-            const js = state.val ? state.val.toString() : "";
-            let sendData;
-
-            try {
-                sendData = JSON.parse(js);
-            } catch (e) {
-                this.log.info(`JSON Parsing Fehler: ${e.message}`);
-                return;
-            }
-
-            this.log.debug(`Sende JSON an Gerät ${deviceId}: ${JSON.stringify(sendData)}`);
-            const sendJ = await this.sendCommandToDevice(deviceId, sendData, false, sync);
-
-            this.log.info(`Antwort von Gerät ${deviceId}: ${JSON.stringify(sendJ)}`);
-            await this.setAckFlag(id);
+            this.log.debug(`Datenpunkt erstellt/aktualisiert: ${fullPath}`);
         } catch (error) {
-            this.log.error(`handleSendJSON Fehler für Gerät ${deviceId}: ${error.message}`);
-        }
-    }
-
-    /**
-     * Behandelt Wetter-bezogene Zustandsänderungen.
-     */
-    async handleWeatherStates(id, state, lastElement) {
-        try {
-            if (lastElement === "device") {
-                await this.setAckFlag(id);
-            } else if (lastElement === "unit") {
-                const units = state.val === "C" ? "°C" : "F";
-                await this.extendObject(`weather.temperature`, { common: { unit: units } });
-                await this.setAckFlag(id);
-            } else if (lastElement === "update") {
-                await this.getWeather();
-                await this.setAckFlag(id, { val: false });
-            }
-        } catch (error) {
-            this.log.error(`handleWeatherStates Fehler für ${id}: ${error.message}`);
-        }
-    }
-
-    /**
-     * Behandelt Befehle für verschiedene Gerätetypen.
-     */
-    async handleDeviceCommands(id, state, deviceId, lastElement) {
-        try {
-            const deviceModel = this.modelInfos[deviceId];
-            if (!deviceModel) {
-                this.log.warn(`Keine Modellinformationen für Gerät ${deviceId}`);
-                return;
-            }
-
-            switch (deviceModel.deviceType) {
-                case 401:
-                    await this.handleDeviceType401Commands(id, state, deviceId, lastElement);
-                    break;
-
-                case 406:
-                    await this.handleDeviceType406Commands(id, state, deviceId, lastElement);
-                    break;
-
-                default:
-                    this.log.warn(`Unbekannter Gerätetyp ${deviceModel.deviceType} für Gerät ${deviceId}`);
-                    break;
-            }
-        } catch (error) {
-            this.log.error(`handleDeviceCommands Fehler für Gerät ${deviceId}: ${error.message}`);
-        }
-    }
-
-    /**
-     * Behandelt spezifische Befehle für Gerätetyp 401.
-     */
-    async handleDeviceType401Commands(id, state, deviceId, lastElement) {
-        try {
-            if (lastElement === "operation") {
-                const action = state.val ? "Start" : "Stop";
-                const data = {
-                    ctrlKey: "Operation",
-                    command: "Set",
-                    dataKey: "operation",
-                    dataValue: action,
-                    dataSetList: null,
-                    dataGetList: null,
-                };
-                this.log.debug(`Sende Befehl an Gerät 401 (${deviceId}): ${JSON.stringify(data)}`);
-                const response = await this.sendCommandToDevice(deviceId, data, false, false);
-
-                if (response && response.resultCode !== "0000") {
-                    this.log.error(`Befehl an Gerät 401 (${deviceId}) fehlgeschlagen: ${JSON.stringify(response)}`);
-                }
-
-                await this.setAckFlag(id);
-            } else {
-                this.log.info(`Nicht implementierter Befehl ${lastElement} für Gerät 401 (${deviceId})`);
-            }
-        } catch (error) {
-            this.log.error(`handleDeviceType401Commands Fehler für Gerät ${deviceId}: ${error.message}`);
-        }
-    }
-
-    /**
-     * Behandelt spezifische Befehle für Gerätetyp 406.
-     */
-    async handleDeviceType406Commands(id, state, deviceId, lastElement) {
-        try {
-            // Beispielhafte Verarbeitung für Gerätetyp 406
-            if (lastElement === "add_new_schedule") {
-                await this.addHeat(deviceId);
-                await this.setAckFlag(id, { val: false });
-                return;
-            } else if (lastElement === "del_new_schedule") {
-                await this.delHeat(deviceId, state.val);
-                await this.setAckFlag(id);
-                return;
-            } else if (lastElement === "send_new_schedule") {
-                await this.sendHeat(deviceId);
-                await this.setAckFlag(id, { val: false });
-                return;
-            } else {
-                this.log.info(`Nicht implementierter Befehl ${lastElement} für Gerätetyp 406 (${deviceId})`);
-                return;
-            }
-        } catch (error) {
-            this.log.error(`handleDeviceType406Commands Fehler für Gerät ${deviceId}: ${error.message}`);
+            this.log.error(`Fehler beim Erstellen/Aktualisieren des Datenpunkts ${fullPath}: ${error.message}`);
         }
     }
 
@@ -1401,249 +1246,313 @@ class LgThinq extends utils.Adapter {
     }
 
     /**
-     * Behandelt spezifische Befehle für verschiedene Gerätetypen.
+     * Holt Benutzerdaten.
+     * @param {string} uri_value - Der URI-Wert.
+     * @param {Object} data - Die Daten für die Anfrage.
+     * @returns {Promise<Object|null>} Die API-Antwort oder null bei Fehlern.
      */
-    async handleDeviceCommands(id, state, deviceId, lastElement) {
+    async getUser(uri_value, data) {
+        const userUrl = `${this.gateway.thinq2Uri}/${uri_value}`;
+        const headers = { ...this.defaultHeaders, "x-client-id": this.userNumber };
+        this.log.debug(`Abrufen von User Info von URL: ${userUrl}`);
+        this.log.debug(`User Info Daten: ${JSON.stringify(data)}`);
+        this.log.debug(`User Info Headers: ${JSON.stringify(headers)}`);
+
         try {
-            const deviceModel = this.modelInfos[deviceId];
-            if (!deviceModel) {
-                this.log.warn(`Keine Modellinformationen für Gerät ${deviceId}`);
-                return;
-            }
-
-            switch (deviceModel.deviceType) {
-                case 401:
-                    await this.handleDeviceType401Commands(id, state, deviceId, lastElement);
-                    break;
-
-                case 406:
-                    await this.handleDeviceType406Commands(id, state, deviceId, lastElement);
-                    break;
-
-                default:
-                    this.log.warn(`Unbekannter Gerätetyp ${deviceModel.deviceType} für Gerät ${deviceId}`);
-                    break;
-            }
+            const resp = await axios.post(userUrl, data, { headers });
+            this.log.debug(`User Info Antwort: ${JSON.stringify(resp.data)}`);
+            return resp.data;
         } catch (error) {
-            this.log.error(`handleDeviceCommands Fehler für Gerät ${deviceId}: ${error.message}`);
-        }
-    }
-
-    /**
-     * Behandelt spezifische Befehle für Gerätetyp 401.
-     */
-    async handleDeviceType401Commands(id, state, deviceId, lastElement) {
-        try {
-            if (lastElement === "operation") {
-                const action = state.val ? "Start" : "Stop";
-                const data = {
-                    ctrlKey: "Operation",
-                    command: "Set",
-                    dataKey: "operation",
-                    dataValue: action,
-                    dataSetList: null,
-                    dataGetList: null,
-                };
-                this.log.debug(`Sende Befehl an Gerät 401 (${deviceId}): ${JSON.stringify(data)}`);
-                const response = await this.sendCommandToDevice(deviceId, data, false, false);
-
-                if (response && response.resultCode !== "0000") {
-                    this.log.error(`Befehl an Gerät 401 (${deviceId}) fehlgeschlagen: ${JSON.stringify(response)}`);
-                }
-
-                await this.setAckFlag(id);
-            } else {
-                this.log.info(`Nicht implementierter Befehl ${lastElement} für Gerät 401 (${deviceId})`);
+            this.log.error(`getUser Fehler: ${error.message}`);
+            if (error.response) {
+                this.log.error(`Antwort der API: ${JSON.stringify(error.response.data)}`);
             }
-        } catch (error) {
-            this.log.error(`handleDeviceType401Commands Fehler für Gerät ${deviceId}: ${error.message}`);
+            return null;
         }
     }
 
     /**
-     * Behandelt spezifische Befehle für Gerätetyp 406.
+     * Sendet einen Befehl an ein Gerät.
+     * @param {string} deviceId - Die Geräte-ID.
+     * @param {Object} values - Die Werte für den Befehl.
+     * @param {boolean} thinq1 - Ob thinq1 verwendet wird.
+     * @param {boolean} get_sync - Ob sync verwendet wird.
+     * @returns {Promise<Object|null>} Die API-Antwort oder null bei Fehlern.
      */
-    async handleDeviceType406Commands(id, state, deviceId, lastElement) {
+    async sendCommandToDevice(deviceId, values, thinq1 = false, get_sync = false) {
         try {
-            // Beispielhafte Verarbeitung für Gerätetyp 406
-            if (lastElement === "add_new_schedule") {
-                await this.addHeat(deviceId);
-                await this.setAckFlag(id, { val: false });
-                return;
-            } else if (lastElement === "del_new_schedule") {
-                await this.delHeat(deviceId, state.val);
-                await this.setAckFlag(id);
-                return;
-            } else if (lastElement === "send_new_schedule") {
-                await this.sendHeat(deviceId);
-                await this.setAckFlag(id, { val: false });
-                return;
-            } else {
-                this.log.info(`Nicht implementierter Befehl ${lastElement} für Gerätetyp 406 (${deviceId})`);
-                return;
-            }
-        } catch (error) {
-            this.log.error(`handleDeviceType406Commands Fehler für Gerät ${deviceId}: ${error.message}`);
-        }
-    }
-
-    /**
-     * Schliesst den Adapter und bereinigt Ressourcen.
-     * @param {() => void} callback - Der Callback, der nach der Bereinigung aufgerufen wird.
-     */
-    async onUnload(callback) {
-        try {
-            this.log.debug("Adapter wird beendet. Bereinige Ressourcen...");
-            this.updateInterval && this.clearInterval(this.updateInterval);
-            this.qualityInterval && this.clearInterval(this.qualityInterval);
-            this.refreshTokenInterval && this.clearInterval(this.refreshTokenInterval);
-            this.refreshTimeout && this.clearTimeout(this.refreshTimeout);
-            this.sleepTimer && this.clearTimeout(this.sleepTimer);
-            this.updateThinq1Interval && this.clearInterval(this.updateThinq1Interval);
-            this.updateThinq1SingleInterval && this.clearInterval(this.updateThinq1SingleInterval);
-            for (const dev in this.workIds) {
-                if (this.modelInfos[dev] && this.modelInfos[dev]["thinq2"] === "thinq1") {
-                    const data = {
-                        platformType: "thinq1",
-                        deviceId: dev,
-                    };
-                    await this.stopMonitor(data);
-                }
-            }
-            callback();
-        } catch (e) {
-            this.log.error(`Fehler beim Beenden des Adapters: ${e.message}`);
-            callback();
-        }
-    }
-
-    /**
-     * Schliesst den Adapter und bereinigt Ressourcen.
-     * @param {() => void} callback - Der Callback, der nach der Bereinigung aufgerufen wird.
-     */
-    async onUnload(callback) {
-        try {
-            this.log.debug("Adapter wird beendet. Bereinige Ressourcen...");
-            this.updateInterval && this.clearInterval(this.updateInterval);
-            this.qualityInterval && this.clearInterval(this.qualityInterval);
-            this.refreshTokenInterval && this.clearInterval(this.refreshTokenInterval);
-            this.refreshTimeout && this.clearTimeout(this.refreshTimeout);
-            this.sleepTimer && this.clearTimeout(this.sleepTimer);
-            this.updateThinq1Interval && this.clearInterval(this.updateThinq1Interval);
-            this.updateThinq1SingleInterval && this.clearInterval(this.updateThinq1SingleInterval);
-            for (const dev in this.workIds) {
-                if (this.modelInfos[dev] && this.modelInfos[dev]["thinq2"] === "thinq1") {
-                    const data = {
-                        platformType: "thinq1",
-                        deviceId: dev,
-                    };
-                    await this.stopMonitor(data);
-                }
-            }
-            callback();
-        } catch (e) {
-            this.log.error(`Fehler beim Beenden des Adapters: ${e.message}`);
-            callback();
-        }
-    }
-
-    /**
-     * Setzt das Ack-Flag für einen Datenpunkt.
-     * @param {string} id - Die ID des Datenpunkts.
-     * @param {Object} value - Der Wert für den Datenpunkt.
-     */
-    async setAckFlag(id, value = {}) {
-        try {
-            if (id) {
-                await this.setStateAsync(id, {
-                    ack: true,
-                    ...value,
-                });
-                this.log.debug(`Setze ack Flag für ${id} auf ${JSON.stringify(value)}`);
-            }
-        } catch (e) {
-            this.log.warn(`setAckFlag: ${e.message}`);
-        }
-    }
-
-    /**
-     * Behandelt das Senden von JSON-Daten an ein Gerät.
-     */
-    async handleSendJSON(id, state, deviceId, lastElement) {
-        try {
-            const sync = lastElement === "sendJSON" ? true : false;
-            const controlsync = lastElement === "sendJSONNoSync" ? "/control" : "/control-sync";
             const headers = this.defaultHeaders;
-            const controlUrl = `${this.gateway.thinq2Uri}/service/devices/${deviceId}${controlsync}`;
-            const js = state.val ? state.val.toString() : "";
-            let sendData;
+            let sync = get_sync ? "control-sync" : "control";
+            let controlUrl = `${this.gateway.thinq2Uri}/service/devices/${deviceId}/${sync}`;
+            let data = {
+                ctrlKey: "basicCtrl",
+                command: "Set",
+                ...values,
+            };
 
-            try {
-                sendData = JSON.parse(js);
-            } catch (e) {
-                this.log.info(`JSON Parsing Fehler: ${e.message}`);
-                return;
+            if (thinq1) {
+                controlUrl = `${this.gateway.thinq1Uri}/rti/rtiControl`;
+                data = values;
             }
 
-            this.log.debug(`Sende JSON an Gerät ${deviceId}: ${JSON.stringify(sendData)}`);
-            const sendJ = await this.sendCommandToDevice(deviceId, sendData, false, sync);
+            this.log.debug(`Sende Befehl an Gerät ${deviceId}: ${JSON.stringify(data)} an URL: ${controlUrl}`);
 
-            this.log.info(`Antwort von Gerät ${deviceId}: ${JSON.stringify(sendJ)}`);
-            await this.setAckFlag(id);
+            const response = await axios.post(controlUrl, data, { headers });
+            this.log.debug(`Antwort von Gerät ${deviceId}: ${JSON.stringify(response.data)}`);
+            return response.data;
         } catch (error) {
-            this.log.error(`handleSendJSON Fehler für Gerät ${deviceId}: ${error.message}`);
-        }
-    }
-
-    /**
-     * Behandelt Wetter-bezogene Zustandsänderungen.
-     */
-    async handleWeatherStates(id, state, lastElement) {
-        try {
-            if (lastElement === "device") {
-                await this.setAckFlag(id);
-            } else if (lastElement === "unit") {
-                const units = state.val === "C" ? "°C" : "F";
-                await this.extendObject(`weather.temperature`, { common: { unit: units } });
-                await this.setAckFlag(id);
-            } else if (lastElement === "update") {
-                await this.getWeather();
-                await this.setAckFlag(id, { val: false });
-            }
-        } catch (error) {
-            this.log.error(`handleWeatherStates Fehler für ${id}: ${error.message}`);
-        }
-    }
-
-    /**
-     * Schliesst den Adapter und bereinigt Ressourcen.
-     * @param {() => void} callback - Der Callback, der nach der Bereinigung aufgerufen wird.
-     */
-    async onUnload(callback) {
-        try {
-            this.log.debug("Adapter wird beendet. Bereinige Ressourcen...");
-            this.updateInterval && this.clearInterval(this.updateInterval);
-            this.qualityInterval && this.clearInterval(this.qualityInterval);
-            this.refreshTokenInterval && this.clearInterval(this.refreshTokenInterval);
-            this.refreshTimeout && this.clearTimeout(this.refreshTimeout);
-            this.sleepTimer && this.clearTimeout(this.sleepTimer);
-            this.updateThinq1Interval && this.clearInterval(this.updateThinq1Interval);
-            this.updateThinq1SingleInterval && this.clearInterval(this.updateThinq1SingleInterval);
-            for (const dev in this.workIds) {
-                if (this.modelInfos[dev] && this.modelInfos[dev]["thinq2"] === "thinq1") {
-                    const data = {
-                        platformType: "thinq1",
-                        deviceId: dev,
-                    };
-                    await this.stopMonitor(data);
+            if (
+                error.response &&
+                error.response.status === 400 &&
+                values.ctrlKey === "reservationCtrl" &&
+                values.command === "Get"
+            ) {
+                this.log.debug(`Bad Request: ${error.message}`);
+            } else {
+                this.log.error(`SendCommandToDevice Fehler für Gerät ${deviceId}: ${error.message}`);
+                if (error.response) {
+                    this.log.error(`Antwort der API: ${JSON.stringify(error.response.data)}`);
                 }
             }
-            callback();
-        } catch (e) {
-            this.log.error(`Fehler beim Beenden des Adapters: ${e.message}`);
-            callback();
+            return null;
         }
     }
+
+    /**
+     * Extrahiert Werte aus dem Geräte-Modell und erstellt Datenpunkte.
+     * @param {Object} device - Das Gerät.
+     */
+    async extractValues(device) {
+        const deviceModel = this.modelInfos[device.deviceId];
+        if (!deviceModel) {
+            this.log.warn(`Keine Modellinformationen für Gerät ${device.deviceId}`);
+            return;
+        }
+
+        let langPack = null;
+        let langPath = device.langPackProductTypeUri ? "langPackProductTypeUri" : 
+                       device.langPackModelUri ? "langPackModelUri" : null;
+
+        if (langPath) {
+            langPack = await axios.get(device[langPath])
+                .then(res => res.data)
+                .catch(error => {
+                    this.log.info(`Fehler beim Abrufen des Sprachpakets für Gerät ${device.deviceId}: ${error}`);
+                    return null;
+                });
+        }
+
+        if (deviceModel["MonitoringValue"] || deviceModel["Value"]) {
+            this.log.debug("Extrahiere Werte aus dem Modell");
+            const deviceType = deviceModel["deviceType"] || 0;
+            let type = "";
+
+            if (device.snapshot && deviceModel["folder"] && deviceType !== 401) {
+                type = deviceModel["folder"];
+            }
+
+            let path = `${device.deviceId}.snapshot.`;
+            if (type) {
+                path += `${type}.`;
+            }
+
+            if (deviceType === 202) {
+                await this.setDryerBlindStates(path);
+            }
+
+            const downloadedCourseType = this.coursetypes[device.deviceId]?.downloadedCourseType || "courseType";
+            const smartCourseType = this.coursetypes[device.deviceId]?.smartCourseType || "WASHERANDDRYER";
+            const courseType = this.coursetypes[device.deviceId]?.courseType || "WASHERANDDRYER";
+            const onlynumber = /^-?[0-9]+$/;
+
+            if (deviceModel["MonitoringValue"]) {
+                for (const state in deviceModel["MonitoringValue"]) {
+                    const fullPath = `${path}${state}`;
+                    this.log.debug(`Verarbeite Datenpunkt: ${fullPath}`);
+
+                    let obj;
+                    try {
+                        obj = await this.getObjectAsync(fullPath);
+                        if (!obj) {
+                            this.log.warn(`Datenpunkt ${fullPath} existiert nicht. Überspringen.`);
+                            continue;
+                        }
+                    } catch (error) {
+                        this.log.error(`Fehler beim Abrufen des Objekts ${fullPath}: ${error.message}`);
+                        continue;
+                    }
+
+                    const common = { ...obj.common };
+                    const commons = {};
+                    let valueObject = deviceModel["MonitoringValue"][state]?.option || null;
+                    const valueDefault = deviceModel["MonitoringValue"][state]?.default || null;
+
+                    if (deviceModel["MonitoringValue"][state]?.value_mapping) {
+                        valueObject = deviceModel["MonitoringValue"][state].value_mapping;
+                    }
+                    if (deviceModel["MonitoringValue"][state]?.value_validation) {
+                        valueObject = deviceModel["MonitoringValue"][state].value_validation;
+                    }
+
+                    if (valueObject && typeof valueObject === "object") {
+                        if (valueObject.max) {
+                            common.min = 0;
+                            switch (state) {
+                                case "moreLessTime":
+                                    common.max = 200;
+                                    break;
+                                case "timeSetting":
+                                    common.max = 360;
+                                    break;
+                                case "AirPolution":
+                                case "airState.quality.odor":
+                                    common.max = 2000000;
+                                    break;
+                                case "airState.miscFuncState.autoDryRemainTime":
+                                    common.max = 300;
+                                    break;
+                                default:
+                                    common.max = (valueDefault != null && valueDefault > valueObject.max) ? valueDefault : valueObject.max;
+                                    break;
+                            }
+                            common.def = valueDefault ? parseFloat(valueDefault) : 0;
+                        } else {
+                            const values = Object.keys(valueObject);
+                            for (const value of values) {
+                                const content = valueObject[value];
+                                if (typeof content === "string") {
+                                    const new_content = content.replace("@", "");
+                                    if (langPack?.[content]) {
+                                        commons[value] = langPack[content].toString("utf-8");
+                                    } else if (this.constants[`${this.lang}Translation`]?.[new_content]) {
+                                        commons[value] = this.constants[`${this.lang}Translation`][new_content];
+                                    } else {
+                                        commons[value] = new_content;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (Object.keys(commons).length > 0) {
+                        common.states = commons;
+                    }
+
+                    try {
+                        if (!obj) {
+                            await this.setObjectNotExistsAsync(fullPath, {
+                                type: "state",
+                                common: common,
+                                native: {},
+                            }).catch((error) => {
+                                this.log.error(`Fehler beim Erstellen des Datenpunkts ${fullPath}: ${error}`);
+                            });
+                        } else {
+                            obj.common = common;
+                            await this.setObjectAsync(fullPath, obj).catch((error) => {
+                                this.log.error(`Fehler beim Aktualisieren des Datenpunkts ${fullPath}: ${error}`);
+                            });
+                        }
+                    } catch (error) {
+                        this.log.error(`Fehler beim Verarbeiten des Datenpunkts ${fullPath}: ${error.message}`);
+                    }
+                }
+            }
+
+            if (deviceModel["Value"]) {
+                for (const state in deviceModel["Value"]) {
+                    const fullPath = `${path}${state}`;
+                    this.log.debug(`Verarbeite Value-Datenpunkt: ${fullPath} (Problem mit 401 device)`);
+
+                    let obj;
+                    try {
+                        obj = await this.getObjectAsync(fullPath);
+                        if (!obj) {
+                            this.log.warn(`Value-Datenpunkt ${fullPath} existiert nicht. Überspringen.`);
+                            continue;
+                        }
+                    } catch (error) {
+                        this.log.error(`Fehler beim Abrufen des Value-Objekts ${fullPath}: ${error.message}`);
+                        continue;
+                    }
+
+                    const common = { ...obj.common };
+                    const commons = {};
+                    let valueObject = deviceModel["Value"][state]?.option || null;
+                    const valueDefault = deviceModel["Value"][state]?.default || null;
+
+                    if (deviceModel["Value"][state]?.value_mapping) {
+                        valueObject = deviceModel["Value"][state].value_mapping;
+                    }
+                    if (deviceModel["Value"][state]?.value_validation) {
+                        valueObject = deviceModel["Value"][state].value_validation;
+                    }
+
+                    if (valueObject && typeof valueObject === "object") {
+                        if (valueObject.max) {
+                            common.min = 0;
+                            switch (state) {
+                                case "moreLessTime":
+                                    common.max = 200;
+                                    break;
+                                case "timeSetting":
+                                    common.max = 360;
+                                    break;
+                                case "AirPolution":
+                                case "airState.quality.odor":
+                                    common.max = 2000000;
+                                    break;
+                                case "airState.miscFuncState.autoDryRemainTime":
+                                    common.max = 300;
+                                    break;
+                                default:
+                                    common.max = (valueDefault != null && valueDefault > valueObject.max) ? valueDefault : valueObject.max;
+                                    break;
+                            }
+                            common.def = valueDefault ? parseFloat(valueDefault) : 0;
+                        } else {
+                            const values = Object.keys(valueObject);
+                            for (const value of values) {
+                                const content = valueObject[value];
+                                if (typeof content === "string") {
+                                    const new_content = content.replace("@", "");
+                                    if (langPack?.[content]) {
+                                        commons[value] = langPack[content].toString("utf-8");
+                                    } else if (this.constants[`${this.lang}Translation`]?.[new_content]) {
+                                        commons[value] = this.constants[`${this.lang}Translation`][new_content];
+                                    } else {
+                                        commons[value] = new_content;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (Object.keys(commons).length > 0) {
+                        common.states = commons;
+                    }
+
+                    try {
+                        if (!obj) {
+                            await this.setObjectNotExistsAsync(fullPath, {
+                                type: "state",
+                                common: common,
+                                native: {},
+                            }).catch((error) => {
+                                this.log.error(`Fehler beim Erstellen des Value-Datenpunkts ${fullPath}: ${error}`);
+                            });
+                        } else {
+                            obj.common = common;
+                            await this.setObjectAsync(fullPath, obj).catch((error) => {
+                                this.log.error(`Fehler beim Aktualisieren des Value-Datenpunkts ${fullPath}: ${error}`);
+                            });
+                        }
+                    } catch (error) {
+                        this.log.error(`Fehler beim Verarbeiten des Value-Datenpunkts ${fullPath}: ${error.message}`);
+                    }
+                }
+            }
+        }
 
     /**
      * Startet die Überwachungsprozesse.
@@ -1728,15 +1637,205 @@ class LgThinq extends utils.Adapter {
     }
 
     /**
-     * Weitere notwendige Methoden wie createAirRemoteStates, createStatistic, createFridge, addHeat, delHeat, sendHeat, etc.
+     * Weitere notwendige Methoden wie createAirRemoteStates, createStatistic, createFridge, addHeat, delHeat, sendHeat, setDryerBlindStates usw.
      * müssen ebenfalls implementiert werden.
      * Diese Methoden sind spezifisch für die Funktionalität deines Adapters und müssen entsprechend deinem Anwendungsfall definiert werden.
      */
     
-    // ... Weitere Methoden hier ...
+    // Beispielimplementierung für fehlende Methoden:
+    
+    /**
+     * Erstellt Air Remote Zustände für ein Gerät.
+     * @param {Object} device - Das Gerät.
+     * @param {Object} deviceModel - Das Gerätemodell.
+     */
+    async createAirRemoteStates(device, deviceModel) {
+        try {
+            const remotePath = `${device.deviceId}.remote.AirRemote`;
+            await this.setObjectNotExistsAsync(remotePath, {
+                type: "channel",
+                common: {
+                    name: "Air Remote",
+                    desc: "Remote Steuerung für Air Gerät",
+                },
+                native: {},
+            });
+
+            // Beispielhafte Zustände erstellen
+            const states = ["power", "mode", "temperature", "fanSpeed"];
+            for (const state of states) {
+                const fullPath = `${remotePath}.${state}`;
+                const common = {
+                    name: state,
+                    type: "boolean",
+                    role: "switch",
+                    write: true,
+                    read: true,
+                    def: false,
+                };
+                await this.setObjectNotExistsAsync(fullPath, {
+                    type: "state",
+                    common: common,
+                    native: {},
+                });
+                this.log.debug(`Erstellt Air Remote Zustand: ${fullPath}`);
+            }
+        } catch (error) {
+            this.log.error(`Fehler beim Erstellen von Air Remote Zuständen für Gerät ${device.deviceId}: ${error.message}`);
+        }
+    }
 
     /**
-     * Behandelt die Überwachung von Geräten.
+     * Erstellt Statistikdaten für ein Gerät.
+     * @param {string} deviceId - Die Geräte-ID.
+     * @param {number} deviceType - Der Gerätetyp.
+     */
+    async createStatistic(deviceId, deviceType) {
+        try {
+            const statPath = `${deviceId}.statistic`;
+            await this.setObjectNotExistsAsync(statPath, {
+                type: "channel",
+                common: {
+                    name: "Statistic",
+                    desc: "Statistikdaten für das Gerät",
+                },
+                native: {},
+            });
+
+            // Beispielhafte Statistikdaten
+            const stats = ["usage", "errors"];
+            for (const stat of stats) {
+                const fullPath = `${statPath}.${stat}`;
+                const common = {
+                    name: stat,
+                    type: "number",
+                    role: "value",
+                    write: false,
+                    read: true,
+                    def: 0,
+                };
+                await this.setObjectNotExistsAsync(fullPath, {
+                    type: "state",
+                    common: common,
+                    native: {},
+                });
+                this.log.debug(`Erstellt Statistik Zustand: ${fullPath}`);
+            }
+        } catch (error) {
+            this.log.error(`Fehler beim Erstellen der Statistik für Gerät ${deviceId}: ${error.message}`);
+        }
+    }
+
+    /**
+     * Erstellt Kühlschrankzustände für ein Gerät.
+     * @param {Object} device - Das Gerät.
+     * @param {Object} deviceModel - Das Gerätemodell.
+     */
+    async createFridge(device, deviceModel) {
+        try {
+            const fridgePath = `${device.deviceId}.fridge`;
+            await this.setObjectNotExistsAsync(fridgePath, {
+                type: "channel",
+                common: {
+                    name: "Fridge",
+                    desc: "Kühlschranksteuerung",
+                },
+                native: {},
+            });
+
+            // Beispielhafte Kühlschrankzustände
+            const states = ["doorOpen", "temperature"];
+            for (const state of states) {
+                const fullPath = `${fridgePath}.${state}`;
+                const common = {
+                    name: state,
+                    type: "boolean",
+                    role: "switch",
+                    write: true,
+                    read: true,
+                    def: false,
+                };
+                await this.setObjectNotExistsAsync(fullPath, {
+                    type: "state",
+                    common: common,
+                    native: {},
+                });
+                this.log.debug(`Erstellt Kühlschrank Zustand: ${fullPath}`);
+            }
+        } catch (error) {
+            this.log.error(`Fehler beim Erstellen der Kühlschrankzustände für Gerät ${device.deviceId}: ${error.message}`);
+        }
+    }
+
+    /**
+     * Fügt eine Heizungssteuerung hinzu.
+     * @param {string} deviceId - Die Geräte-ID.
+     */
+    async addHeat(deviceId) {
+        // Implementiere die Logik zum Hinzufügen einer Heizungssteuerung
+        this.log.debug(`Füge Heizungssteuerung für Gerät ${deviceId} hinzu...`);
+    }
+
+    /**
+     * Entfernt eine Heizungssteuerung.
+     * @param {string} deviceId - Die Geräte-ID.
+     * @param {any} value - Der Wert zur Identifizierung der zu entfernenden Steuerung.
+     */
+    async delHeat(deviceId, value) {
+        // Implementiere die Logik zum Entfernen einer Heizungssteuerung
+        this.log.debug(`Entferne Heizungssteuerung für Gerät ${deviceId} mit Wert ${value}...`);
+    }
+
+    /**
+     * Sendet eine Heizungssteuerung.
+     * @param {string} deviceId - Die Geräte-ID.
+     */
+    async sendHeat(deviceId) {
+        // Implementiere die Logik zum Senden einer Heizungssteuerung
+        this.log.debug(`Sende Heizungssteuerung für Gerät ${deviceId}...`);
+    }
+
+    /**
+     * Setzt die Zustände der Trockner-Rollladen.
+     * @param {string} path - Der Pfad zum Trockner-Rollladen.
+     */
+    async setDryerBlindStates(path) {
+        // Implementiere die Logik zum Setzen der Zustände der Trockner-Rollladen
+        this.log.debug(`Setze Trockner-Rollladen Zustände für Pfad ${path}...`);
+    }
+
+    /**
+     * Erstellt Remote-Steuerungszustände für ein Gerät.
+     * @param {string} deviceId - Die Geräte-ID.
+     * @param {string} control - Die Steuerung.
+     * @param {Object} deviceModel - Das Gerätemodell.
+     */
+    async createremote(deviceId, control, deviceModel) {
+        try {
+            const remotePath = `${deviceId}.remote.${control}`;
+            const common = {
+                name: control,
+                type: "boolean",
+                role: "switch",
+                write: true,
+                read: true,
+                def: false,
+            };
+            await this.setObjectNotExistsAsync(remotePath, {
+                type: "state",
+                common: common,
+                native: {},
+            });
+            this.log.debug(`Erstellt Remote Steuerungszustand: ${remotePath}`);
+        } catch (error) {
+            this.log.error(`Fehler beim Erstellen des Remote Steuerungszustands ${deviceId}.${control}: ${error.message}`);
+        }
+    }
+
+    // ... Weitere spezifische Methoden hier ...
+
+    /**
+     * Beendet die Überwachung eines Geräts.
      * @param {Object} data - Die Daten zur Überwachung.
      */
     async stopMonitor(data) {
@@ -1745,6 +1844,7 @@ class LgThinq extends utils.Adapter {
     }
 }
 
+// Exportiere den Konstruktor im kompakten Modus
 if (require.main !== module) {
     /**
      * @param {Partial<utils.AdapterOptions>} [options={}]
